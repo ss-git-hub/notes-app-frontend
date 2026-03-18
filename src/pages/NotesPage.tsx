@@ -4,16 +4,17 @@
  * Protected page — the main dashboard showing all user notes.
  *
  * Features:
- *   — Fetches all notes via useNotes hook (TanStack Query)
+ *   — Infinite scroll / Load More pagination (cursor-based via nextKey)
+ *   — Client-side search by title and content
+ *   — Client-side filter by tag (click a tag chip to filter by it)
  *   — Loading skeleton while notes are fetching
- *   — Empty state when user has no notes yet
- *   — Note cards in a responsive grid layout
- *   — Each card shows title, content preview, tags, and date
- *   — Delete note directly from the card with confirmation
- *   — Click card to navigate to note detail/edit page
- *   — Error state if fetch fails
+ *   — Empty state with different messages for no notes vs no search results
+ *   — Responsive note card grid
+ *   — Optimistic delete — card disappears instantly before server confirms
+ *   — ARIA labels on all icon buttons
  */
 
+import { useState, useMemo } from 'react';
 import {
   Box,
   Button,
@@ -21,18 +22,27 @@ import {
   CardActionArea,
   CardContent,
   Chip,
+  CircularProgress,
   Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Grid,
   IconButton,
+  InputAdornment,
   Skeleton,
+  TextField,
   Tooltip,
   Typography
 } from '@mui/material';
-
 import {
   Add as AddIcon,
+  Clear as ClearIcon,
   Delete as DeleteIcon,
-  NoteAdd as NoteAddIcon
+  NoteAdd as NoteAddIcon,
+  Search as SearchIcon
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { useNotes, useDeleteNote } from '../hooks/useNotes';
@@ -41,37 +51,18 @@ import type { Note } from '../types';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * formatDate — converts ISO string to a readable date.
- * "2026-03-01T12:00:00.000Z" → "Mar 1, 2026"
- */
-const formatDate = (iso: string) => {
-  return new Date(iso).toLocaleDateString('en-US', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric'
+const formatDate = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric'
   });
-};
 
-/**
- * truncate — shortens content preview to a max character length.
- * Prevents long notes from overflowing the card.
- */
-const truncate = (text: string, max = 120) => {
-  return text.length > max ? text.slice(0, max) + '...' : text;
-};
+const truncate = (text: string, max = 120) =>
+  text.length > max ? text.slice(0, max) + '...' : text;
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-/**
- * NoteCardSkeleton — placeholder card shown while notes are loading.
- * Matches the shape of a real NoteCard so the layout doesn't jump.
- */
 const NoteCardSkeleton = () => (
-  <Card
-    elevation={0}
-    sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, height: 200, width: 200 }}
-  >
+  <Card elevation={0} sx={{ border: '1px solid', borderColor: 'divider', borderRadius: 2, height: 200 }}>
     <CardContent>
       <Skeleton variant='text' width='60%' height={28} sx={{ mb: 1 }} />
       <Skeleton variant='text' width='100%' />
@@ -83,14 +74,21 @@ const NoteCardSkeleton = () => (
 
 /**
  * NoteCard — renders a single note as a clickable card.
- * Delete button is shown on hover via CSS.
+ *
+ * Accessibility:
+ *   The delete IconButton has an aria-label so screen readers announce
+ *   "Delete note: <title>" instead of just "button".
  */
 const NoteCard = ({
   note,
-  onDelete
+  onDelete,
+  activeTag,
+  onTagClick
 }: {
   note: Note;
   onDelete: (noteId: string) => void;
+  activeTag: string | null;
+  onTagClick: (tag: string) => void;
 }) => {
   const navigate = useNavigate();
 
@@ -106,44 +104,29 @@ const NoteCard = ({
         '&:hover': {
           borderColor: 'primary.main',
           boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
-          // Show delete button on hover
           '& .delete-btn': { opacity: 1 }
         }
       }}
     >
-      {/* Clicking the card body navigates to the note detail page */}
       <CardActionArea
         onClick={() => navigate(`/notes/${note.noteId}`)}
         sx={{ borderRadius: 2 }}
+        aria-label={`Open note: ${note.title}`}
       >
         <CardContent sx={{ pb: '12px !important' }}>
-          {/* Title */}
           <Typography
             variant='h6'
             fontWeight={600}
             gutterBottom
-            sx={{
-              // Leave space for the delete button
-              pr: 4,
-              // Clamp to 1 line with ellipsis
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap'
-            }}
+            sx={{ pr: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
           >
             {note.title}
           </Typography>
 
-          {/* Content preview */}
-          <Typography
-            variant='body2'
-            color='text.secondary'
-            sx={{ mb: 2, lineHeight: 1.6 }}
-          >
+          <Typography variant='body2' color='text.secondary' sx={{ mb: 2, lineHeight: 1.6 }}>
             {truncate(note.content)}
           </Typography>
 
-          {/* Tags */}
           {note.tags.length > 0 && (
             <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1.5 }}>
               {note.tags.map((tag) => (
@@ -151,26 +134,31 @@ const NoteCard = ({
                   key={tag}
                   label={tag}
                   size='small'
-                  variant='outlined'
-                  sx={{ fontSize: '0.7rem' }}
+                  variant={activeTag === tag ? 'filled' : 'outlined'}
+                  color={activeTag === tag ? 'primary' : 'default'}
+                  sx={{ fontSize: '0.7rem', cursor: 'pointer' }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTagClick(tag);
+                  }}
+                  aria-label={`Filter by tag: ${tag}`}
+                  aria-pressed={activeTag === tag}
                 />
               ))}
             </Box>
           )}
 
-          {/* Date */}
           <Typography variant='caption' color='text.disabled'>
             {formatDate(note.updatedAt)}
           </Typography>
         </CardContent>
       </CardActionArea>
 
-      {/* Delete button — hidden by default, shown on card hover */}
-      {/* stopPropagation prevents the card click from also firing */}
-      <Tooltip title='Delete note'>
+      <Tooltip title={`Delete note: ${note.title}`}>
         <IconButton
           className='delete-btn'
           size='small'
+          aria-label={`Delete note: ${note.title}`}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(note.noteId);
@@ -181,8 +169,7 @@ const NoteCard = ({
             right: 8,
             opacity: 0,
             transition: 'opacity 0.2s ease',
-            color: 'error.main',
-            '&:hover': { bgcolor: 'error.lighter' }
+            color: 'error.main'
           }}
         >
           <DeleteIcon fontSize='small' />
@@ -197,25 +184,79 @@ const NoteCard = ({
 const NotesPage = () => {
   const navigate = useNavigate();
   const { showSnackbar } = useSnackbar();
-  const { data, isLoading, isError } = useNotes();
+
+  // ── Search and filter state ────────────────────────────────────────────────
+
+  const [searchText, setSearchText] = useState('');
+  // activeTag — when set, only notes with this tag are shown
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  // pendingDeleteId — noteId waiting for delete confirmation; null when dialog is closed
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
+  // ── Data ───────────────────────────────────────────────────────────────────
+
+  const {
+    data,
+    isLoading,
+    isError,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage
+  } = useNotes();
+
   const deleteNote = useDeleteNote();
 
-  // ── Delete handler ─────────────────────────────────────────────────────────
+  // Flatten all pages into a single notes array
+  const allNotes: Note[] = useMemo(
+    () => data?.pages.flatMap((p) => p.notes) ?? [],
+    [data]
+  );
+
+  // ── Client-side search + filter ────────────────────────────────────────────
 
   /**
-   * handleDelete — deletes a note and shows a snackbar on success/error.
-   * No confirmation dialog for now — the delete button is intentionally
-   * hidden until hover to prevent accidental deletion.
+   * filteredNotes — derived from allNotes, applies:
+   *   1. Text search: matches title OR content (case-insensitive)
+   *   2. Tag filter: when activeTag is set, only notes that include it
+   *
+   * Both filters compose — you can search AND filter by tag simultaneously.
+   * Client-side filtering is instant and works across all loaded pages.
    */
-  const handleDelete = (noteId: string) => {
-    deleteNote.mutate(noteId, {
-      onSuccess: () => {
-        showSnackbar('Note deleted', 'success');
-      },
-      onError: () => {
-        showSnackbar('Failed to delete note', 'error');
-      }
+  const filteredNotes = useMemo(() => {
+    const query = searchText.trim().toLowerCase();
+    return allNotes.filter((note) => {
+      const matchesSearch =
+        !query ||
+        note.title.toLowerCase().includes(query) ||
+        note.content.toLowerCase().includes(query);
+      const matchesTag =
+        !activeTag || note.tags.includes(activeTag);
+      return matchesSearch && matchesTag;
     });
+  }, [allNotes, searchText, activeTag]);
+
+  const totalLoaded = allNotes.length;
+
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
+  // Opens the confirmation dialog — actual deletion happens in handleConfirmDelete
+  const handleDelete = (noteId: string) => {
+    setPendingDeleteId(noteId);
+  };
+
+  const handleConfirmDelete = () => {
+    if (!pendingDeleteId) return;
+    const id = pendingDeleteId;
+    setPendingDeleteId(null);
+    deleteNote.mutate(id, {
+      onSuccess: () => showSnackbar('Note deleted', 'success'),
+      onError: () => showSnackbar('Failed to delete note', 'error')
+    });
+  };
+
+  const handleTagClick = (tag: string) => {
+    // Toggle: clicking the active tag clears the filter
+    setActiveTag((prev) => (prev === tag ? null : tag));
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -224,22 +265,15 @@ const NotesPage = () => {
     <Container maxWidth='lg'>
 
       {/* ── Page header ──────────────────────────────────────────── */}
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          mb: 4
-        }}
-      >
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 3 }}>
         <Box>
           <Typography variant='h4' fontWeight={700}>
             My Notes
           </Typography>
           <Typography variant='body2' color='text.secondary' sx={{ mt: 0.5 }}>
-            {data?.notes.length
-              ? `${data.notes.length} note${data.notes.length > 1 ? 's' : ''}`
-              : 'No notes yet'
+            {isLoading
+              ? 'Loading…'
+              : `${filteredNotes.length} of ${totalLoaded} note${totalLoaded !== 1 ? 's' : ''} shown`
             }
           </Typography>
         </Box>
@@ -248,9 +282,53 @@ const NotesPage = () => {
           variant='contained'
           startIcon={<AddIcon />}
           onClick={() => navigate('/notes/new')}
+          aria-label='Create new note'
         >
           New Note
         </Button>
+      </Box>
+
+      {/* ── Search + active tag filter bar ────────────────────────── */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 3, flexWrap: 'wrap' }}>
+        <TextField
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          placeholder='Search notes…'
+          size='small'
+          sx={{ minWidth: 240, flexGrow: 1, maxWidth: 400 }}
+          inputProps={{ 'aria-label': 'Search notes' }}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position='start'>
+                <SearchIcon fontSize='small' color='action' />
+              </InputAdornment>
+            ),
+            endAdornment: searchText && (
+              <InputAdornment position='end'>
+                <Tooltip title='Clear search'>
+                  <IconButton
+                    size='small'
+                    aria-label='Clear search'
+                    onClick={() => setSearchText('')}
+                  >
+                    <ClearIcon fontSize='small' />
+                  </IconButton>
+                </Tooltip>
+              </InputAdornment>
+            )
+          }}
+        />
+
+        {/* Active tag chip — shows which tag is being filtered, click to clear */}
+        {activeTag && (
+          <Chip
+            label={`Tag: ${activeTag}`}
+            onDelete={() => setActiveTag(null)}
+            color='primary'
+            size='small'
+            aria-label={`Remove tag filter: ${activeTag}`}
+          />
+        )}
       </Box>
 
       {/* ── Error state ───────────────────────────────────────────── */}
@@ -265,10 +343,9 @@ const NotesPage = () => {
         </Box>
       )}
 
-      {/* ── Loading state — skeleton grid ────────────────────────── */}
+      {/* ── Loading skeleton ──────────────────────────────────────── */}
       {isLoading && (
         <Grid container spacing={3}>
-          {/* Render 6 skeleton cards while loading */}
           {Array.from({ length: 6 }).map((_, i) => (
             <Grid size={{ xs: 12, sm: 6, md: 4 }} key={i}>
               <NoteCardSkeleton />
@@ -277,46 +354,86 @@ const NotesPage = () => {
         </Grid>
       )}
 
-      {/* ── Empty state ───────────────────────────────────────────── */}
-      {!isLoading && !isError && data?.notes.length === 0 && (
-        <Box
-          sx={{
-            textAlign: 'center',
-            py: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 2
-          }}
-        >
+      {/* ── Empty state — no notes at all ─────────────────────────── */}
+      {!isLoading && !isError && allNotes.length === 0 && (
+        <Box sx={{ textAlign: 'center', py: 12, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
           <NoteAddIcon sx={{ fontSize: 64, color: 'text.disabled' }} />
-          <Typography variant='h6' color='text.secondary'>
-            No notes yet
-          </Typography>
+          <Typography variant='h6' color='text.secondary'>No notes yet</Typography>
           <Typography variant='body2' color='text.disabled'>
             Create your first note to get started
           </Typography>
-          <Button
-            variant='contained'
-            startIcon={<AddIcon />}
-            onClick={() => navigate('/notes/new')}
-            sx={{ mt: 1 }}
-          >
+          <Button variant='contained' startIcon={<AddIcon />} onClick={() => navigate('/notes/new')} sx={{ mt: 1 }}>
             Create note
           </Button>
         </Box>
       )}
 
-      {/* ── Notes grid ────────────────────────────────────────────── */}
-      {!isLoading && !isError && data && data.notes.length > 0 && (
-        <Grid container spacing={3}>
-          {data.notes.map((note) => (
-            <Grid size={{ xs: 12, sm: 6, md: 4 }} key={note.noteId}>
-              <NoteCard note={note} onDelete={handleDelete} />
-            </Grid>
-          ))}
-        </Grid>
+      {/* ── Empty state — search/filter returned no results ───────── */}
+      {!isLoading && !isError && allNotes.length > 0 && filteredNotes.length === 0 && (
+        <Box sx={{ textAlign: 'center', py: 8 }}>
+          <Typography color='text.secondary' gutterBottom>
+            No notes match your search
+          </Typography>
+          <Button variant='text' onClick={() => { setSearchText(''); setActiveTag(null); }}>
+            Clear filters
+          </Button>
+        </Box>
       )}
+
+      {/* ── Notes grid ────────────────────────────────────────────── */}
+      {!isLoading && !isError && filteredNotes.length > 0 && (
+        <>
+          <Grid container spacing={3}>
+            {filteredNotes.map((note) => (
+              <Grid size={{ xs: 12, sm: 6, md: 4 }} key={note.noteId}>
+                <NoteCard
+                  note={note}
+                  onDelete={handleDelete}
+                  activeTag={activeTag}
+                  onTagClick={handleTagClick}
+                />
+              </Grid>
+            ))}
+          </Grid>
+
+          {/* ── Load More button ──────────────────────────────────── */}
+          {/* Only shown when there are more pages and no active filter
+              (filtering is client-side so more pages may contain matches) */}
+          {hasNextPage && (
+            <Box sx={{ display: 'flex', justifyContent: 'center', mt: 4 }}>
+              <Button
+                variant='outlined'
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                aria-label='Load more notes'
+                startIcon={
+                  isFetchingNextPage
+                    ? <CircularProgress size={16} color='inherit' />
+                    : undefined
+                }
+              >
+                {isFetchingNextPage ? 'Loading…' : 'Load more'}
+              </Button>
+            </Box>
+          )}
+        </>
+      )}
+
+      {/* ── Delete confirmation dialog ───────────────────────────── */}
+      <Dialog open={!!pendingDeleteId} onClose={() => setPendingDeleteId(null)}>
+        <DialogTitle fontWeight={600}>Delete note?</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This note will be permanently deleted and cannot be recovered.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setPendingDeleteId(null)}>Cancel</Button>
+          <Button onClick={handleConfirmDelete} color='error' variant='contained'>
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
     </Container>
   );

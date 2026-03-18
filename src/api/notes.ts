@@ -15,10 +15,20 @@ import type {
 
 /**
  * GET /notes
- * Protected — returns all notes for the logged-in user.
+ * Protected — returns a paginated page of notes for the logged-in user.
+ *
+ * params.lastKey — base64-encoded cursor from the previous page's nextKey.
+ *                  Omit to fetch the first page.
+ * params.limit   — max notes per page (default 20, max 100 on the backend).
+ *
+ * The response includes nextKey which is passed back as lastKey on the
+ * next request to implement cursor-based pagination.
  */
-export const getAllNotes = async (): Promise<NotesListResponse> => {
-  const res = await api.get<NotesListResponse>('/notes');
+export const getAllNotes = async (params?: {
+  lastKey?: string;
+  limit?: number;
+}): Promise<NotesListResponse> => {
+  const res = await api.get<NotesListResponse>('/notes', { params });
   return res.data;
 };
 

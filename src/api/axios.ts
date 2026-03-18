@@ -1,98 +1,142 @@
 /**
  * src/api/axios.ts
  *
- * Axios instance — the single HTTP client used across the entire app.
+ * Configured Axios instance — the single HTTP client used across the entire app.
  *
- * Instead of calling axios.get/post directly everywhere, we create
- * one configured instance with:
- *   — baseURL set to the API Gateway URL from .env
- *   — request interceptor that automatically attaches the JWT token
- *     to every outgoing request so we never have to do it manually
- *   — response interceptor that handles 401s globally — clears auth
- *     state and redirects to login when the token expires
+ * Three responsibilities:
+ *   1. Request interceptor  — attaches the access token to every request
+ *   2. Response interceptor — silently refreshes an expired access token
+ *                             and retries the original request (token refresh)
+ *   3. Network error        — surfaces clean messages for offline/timeout errors
  *
- * Express equivalent: an axios instance is like a pre-configured
- * fetch wrapper — similar to how you'd set up a base fetch utility.
+ * Silent token refresh flow:
+ *   Access tokens expire after 15 minutes. When that happens:
+ *     1. The backend returns 401
+ *     2. This interceptor catches it (skip for /users/login and /users/refresh)
+ *     3. Calls POST /users/refresh with the stored refresh token
+ *     4. If refresh succeeds — stores the new access token and retries
+ *        the original request transparently. The user sees nothing.
+ *     5. If refresh fails  — clears auth and redirects to /login
+ *
+ * Request queuing:
+ *   Multiple requests can fail simultaneously if the access token expires
+ *   while several are in-flight. We queue them and replay all at once after
+ *   the single refresh call resolves — preventing multiple concurrent refreshes.
+ *
+ * Circular dependency avoidance:
+ *   auth.ts → api (this file). So the refresh call inside this file uses
+ *   raw axios (not the `api` instance) to avoid triggering the interceptor
+ *   again on the refresh request itself.
  */
 
-import axios from 'axios';
+import axios, { type InternalAxiosRequestConfig } from 'axios';
 import { useAuthStore } from '../store/authStore';
+import { refreshAccessToken } from './auth';
+
+// ── Axios instance ───────────────────────────────────────────────────────────
 
 const api = axios.create({
-  // VITE_API_URL is defined in .env at the root of the project
-  // Vite exposes env variables prefixed with VITE_ via import.meta.env
   baseURL: import.meta.env.VITE_API_URL,
-  headers: {
-    'Content-Type': 'application/json'
-  }
+  headers: { 'Content-Type': 'application/json' }
 });
+
+// ── Token refresh queue ──────────────────────────────────────────────────────
+
+/**
+ * isRefreshing prevents multiple concurrent refresh calls.
+ * If 3 requests all get 401 at the same time, only the first one
+ * calls /users/refresh — the other two are queued here and replayed
+ * with the new token once the refresh completes.
+ */
+let isRefreshing = false;
+let pendingQueue: Array<(newToken: string) => void> = [];
+
+const flushQueue = (newToken: string) => {
+  pendingQueue.forEach((cb) => cb(newToken));
+  pendingQueue = [];
+};
 
 // ── Request interceptor ──────────────────────────────────────────────────────
 
 /**
  * Runs before every outgoing request.
- * Reads the token from Zustand and attaches it as a Bearer token.
- *
- * This means every API call automatically gets the auth header —
- * we never have to manually pass the token in individual API calls.
- *
- * Express equivalent:
- *   axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
- *   but done properly per-request rather than once globally.
+ * Reads the current access token from Zustand and attaches it as Bearer.
+ * getState() works outside React components — inside, use the hook.
  */
 api.interceptors.request.use((config) => {
-  // getState() reads Zustand store outside of a React component
-  // Inside components you use the hook — outside you use getState()
   const token = useAuthStore.getState().token;
-
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
-
   return config;
 });
 
 // ── Response interceptor ─────────────────────────────────────────────────────
 
-/**
- * Runs after every response comes back.
- * The error handler catches any failed request globally.
- *
- * The key job here is handling 401 Unauthorized —
- * which means the JWT token has expired or is invalid.
- * When this happens we:
- *   1. Clear the auth state (token + user) from Zustand + localStorage
- *   2. Redirect to /login
- *
- * Without this, the user would just see confusing errors instead of
- * being sent back to the login page automatically.
- */
 api.interceptors.response.use(
-  // Success — just pass the response through unchanged
+  // Success — pass through unchanged
   (response) => response,
 
-  // Error — handle globally
-  (error) => {
-    // Only redirect to login on 401 if it's NOT the login endpoint itself.
-    // A 401 from /users/login means wrong credentials — that's an expected
-    // error that the form handles itself via the onError callback.
-    // A 401 from any other endpoint means the JWT token has expired
-    // or is invalid — in that case we clear auth and redirect to login.
-    if (
-      error.response?.status === 401 &&
-      !error.config?.url?.includes("/users/login")
-    ) {
-      // Token expired or invalid — clear everything and redirect
-      // Skip this for the login endpoint itself so wrong credentials
-      // don't cause a page reload before the snackbar can appear
-      useAuthStore.getState().clearAuth();
-      window.location.href = "/login";
+  // Error — attempt silent token refresh on 401
+  async (error) => {
+    const config = error.config as InternalAxiosRequestConfig & { _retried?: boolean };
+
+    // ── Skip refresh for these endpoints ──────────────────────────────────
+    // /users/login  — 401 here means wrong credentials, not expired token
+    // /users/refresh — 401 here means the refresh token itself is invalid
+    //                  (expired or logged out); redirect to login
+    const url = config?.url ?? '';
+    const isAuthEndpoint =
+      url.includes('/users/login') || url.includes('/users/refresh');
+
+    if (error.response?.status !== 401 || isAuthEndpoint || config?._retried) {
+      return Promise.reject(error);
     }
 
-    // Re-throw the error so individual API calls can still
-    // catch and handle it with their own error messages
-    return Promise.reject(error);
-  },
+    // ── No refresh token stored — session is dead ─────────────────────────
+    const { refreshToken, setToken, clearAuth } = useAuthStore.getState();
+    if (!refreshToken) {
+      clearAuth();
+      window.location.href = '/login';
+      return Promise.reject(error);
+    }
+
+    // ── Another refresh is already in-flight — queue this request ─────────
+    if (isRefreshing) {
+      return new Promise<ReturnType<typeof api>>((resolve) => {
+        pendingQueue.push((newToken) => {
+          config.headers.Authorization = `Bearer ${newToken}`;
+          resolve(api(config));
+        });
+      });
+    }
+
+    // ── Kick off the refresh ───────────────────────────────────────────────
+    config._retried = true;
+    isRefreshing = true;
+
+    try {
+      const { accessToken } = await refreshAccessToken(refreshToken);
+
+      // Store the new access token and replay all queued requests
+      setToken(accessToken);
+      flushQueue(accessToken);
+
+      // Retry the original request with the fresh token
+      config.headers.Authorization = `Bearer ${accessToken}`;
+      return api(config);
+
+    } catch {
+      // Refresh token is expired or invalid — full logout
+      pendingQueue = [];
+      clearAuth();
+      window.location.href = '/login';
+      return Promise.reject(error);
+
+    } finally {
+      isRefreshing = false;
+    }
+  }
 );
 
 export default api;

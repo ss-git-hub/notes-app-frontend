@@ -85,7 +85,9 @@ type ChangePasswordFormData = z.infer<typeof changePasswordSchema>;
 const ProfilePage = () => {
   const { user, setUser } = useAuthStore();
   const { showSnackbar } = useSnackbar();
-  const updateProfile = useUpdateProfile();
+  // Two separate mutation instances so each button tracks its own isPending state
+  const updateName     = useUpdateProfile();
+  const updatePassword = useUpdateProfile();
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -137,7 +139,7 @@ const ProfilePage = () => {
   }, [user?.name, resetName]);
 
   const onNameSubmit = (data: UpdateNameFormData) => {
-    updateProfile.mutate(
+    updateName.mutate(
       { name: data.name },
       {
         onSuccess: (res) => {
@@ -172,7 +174,7 @@ const ProfilePage = () => {
   });
 
   const onPasswordSubmit = (data: ChangePasswordFormData) => {
-    updateProfile.mutate(
+    updatePassword.mutate(
       {
         currentPassword: data.currentPassword,
         newPassword: data.newPassword
@@ -286,10 +288,10 @@ const ProfilePage = () => {
             <Button
               type='submit'
               variant='contained'
-              disabled={updateProfile.isPending}
+              disabled={updateName.isPending}
               sx={{ minWidth: 140 }}
             >
-              {updateProfile.isPending
+              {updateName.isPending
                 ? <CircularProgress size={22} color='inherit' />
                 : 'Update Name'
               }
@@ -359,10 +361,10 @@ const ProfilePage = () => {
               type='submit'
               variant='contained'
               color='error'
-              disabled={updateProfile.isPending}
+              disabled={updatePassword.isPending}
               sx={{ minWidth: 160 }}
             >
-              {updateProfile.isPending
+              {updatePassword.isPending
                 ? <CircularProgress size={22} color='inherit' />
                 : 'Change Password'
               }

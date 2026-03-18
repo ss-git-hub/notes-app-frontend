@@ -39,11 +39,14 @@ export interface Note {
 
 /**
  * AuthState — shape of what we store in Zustand.
- * token is the raw JWT string returned by the login endpoint.
- * user is the SafeUser returned alongside the token.
+ * token        — short-lived JWT access token (15 min). Sent with every request.
+ * refreshToken — long-lived UUID (7 days). Used only to silently refresh the
+ *                access token when it expires — never sent to protected routes.
+ * user         — the logged-in user's profile data.
  */
 export interface AuthState {
   token: string | null;
+  refreshToken: string | null;
   user: SafeUser | null;
 }
 
@@ -57,7 +60,8 @@ export interface AuthState {
 
 export interface LoginResponse {
   message: string;
-  token: string;
+  accessToken: string;   // short-lived JWT (15 min) — sent in Authorization header
+  refreshToken: string;  // long-lived UUID (7 days) — stored for silent refresh
   user: SafeUser;
 }
 
@@ -82,17 +86,20 @@ export interface NoteResponse {
 
 export interface NotesListResponse {
   notes: Note[];
+  count: number;
+  // nextKey is the base64-encoded DynamoDB cursor for the next page.
+  // null means this is the last page — no more items to fetch.
+  nextKey: string | null;
 }
 
 // ── API Error ────────────────────────────────────────────────────────────────
 
 /**
  * ApiError — shape of error responses from the backend.
- * Every error Lambda returns { message: string }.
- * We use this in the Axios interceptor to extract the error message.
+ * Every error Lambda returns { error: string }.
  */
 export interface ApiError {
-  message: string;
+  error: string;
 }
 
 // ── Form input types ─────────────────────────────────────────────────────────

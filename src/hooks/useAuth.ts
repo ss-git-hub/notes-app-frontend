@@ -16,36 +16,14 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { loginUser, registerUser, getProfile, updateProfile } from '../api/auth';
+import { loginUser, registerUser, getProfile, updateProfile, logoutUser } from '../api/auth';
 import { useAuthStore } from '../store/authStore';
-import axios from 'axios';
+import { extractError } from '../lib/extractError';
 
 // ── Query keys ───────────────────────────────────────────────────────────────
 
-/**
- * Query keys are how TanStack Query identifies and caches data.
- * Centralising them here prevents typos and makes cache
- * invalidation easy — if you want to refetch profile data anywhere
- * in the app, you just invalidate AUTH_KEYS.profile.
- */
 export const AUTH_KEYS = {
   profile: ['profile'] as const
-};
-
-// ── Helper ───────────────────────────────────────────────────────────────────
-
-/**
- * extractErrorMessage
- *
- * Extracts a human-readable error message from an Axios error.
- * Our backend always returns { message: string } in the error body.
- * If for some reason it doesn't, we fall back to a generic message.
- */
-const extractErrorMessage = (err: unknown): string => {
-  if (axios.isAxiosError(err)) {
-    return err.response?.data?.message ?? 'Something went wrong';
-  }
-  return 'Something went wrong';
 };
 
 // ── Hooks ────────────────────────────────────────────────────────────────────
@@ -54,8 +32,9 @@ const extractErrorMessage = (err: unknown): string => {
  * useLogin
  *
  * Mutation hook for POST /users/login.
- * On success — stores token and user in Zustand, navigates to /notes.
- * On error — returns the error message for the form to display.
+ * On success — stores both tokens and user in Zustand, navigates to /notes.
+ * The access token is used immediately for API calls; the refresh token is
+ * stored for silent renewal when the access token expires.
  */
 export const useLogin = () => {
   const { setAuth } = useAuthStore();
@@ -64,12 +43,10 @@ export const useLogin = () => {
   return useMutation({
     mutationFn: loginUser,
     onSuccess: (data) => {
-      // Store token and user in Zustand (persisted to localStorage)
-      setAuth(data.token, data.user);
-      // Redirect to the notes list page
+      setAuth(data.accessToken, data.refreshToken, data.user);
       navigate('/notes');
     },
-    onError: (err: unknown) => extractErrorMessage(err)
+    onError: (err: unknown) => extractError(err)
   });
 };
 
@@ -78,8 +55,7 @@ export const useLogin = () => {
  *
  * Mutation hook for POST /users/register.
  * On success — navigates to /login so the user can sign in.
- * We don't auto-login after register because the backend
- * doesn't return a token on register — only on login.
+ * The backend does not issue tokens on register — only on login.
  */
 export const useRegister = () => {
   const navigate = useNavigate();
@@ -89,7 +65,7 @@ export const useRegister = () => {
     onSuccess: () => {
       navigate('/login');
     },
-    onError: (err: unknown) => extractErrorMessage(err)
+    onError: (err: unknown) => extractError(err)
   });
 };
 
@@ -97,8 +73,7 @@ export const useRegister = () => {
  * useProfile
  *
  * Query hook for GET /users/profile.
- * Only runs if the user is authenticated (token exists in Zustand).
- * Caches the profile data under AUTH_KEYS.profile.
+ * Only runs if the user is authenticated.
  */
 export const useProfile = () => {
   const { isAuthenticated } = useAuthStore();
@@ -106,8 +81,6 @@ export const useProfile = () => {
   return useQuery({
     queryKey: AUTH_KEYS.profile,
     queryFn: getProfile,
-    // Don't fetch if the user is not logged in
-    // This prevents unnecessary API calls on public pages
     enabled: isAuthenticated()
   });
 };
@@ -116,8 +89,7 @@ export const useProfile = () => {
  * useUpdateProfile
  *
  * Mutation hook for PUT /users/profile.
- * On success — updates the user in Zustand and invalidates
- * the profile query so it refetches fresh data.
+ * On success — updates the user in Zustand and invalidates the profile cache.
  */
 export const useUpdateProfile = () => {
   const { setUser } = useAuthStore();
@@ -126,27 +98,35 @@ export const useUpdateProfile = () => {
   return useMutation({
     mutationFn: updateProfile,
     onSuccess: (data) => {
-      // Update user in Zustand store so navbar/header reflects changes
       setUser(data.user);
-      // Invalidate the profile cache so useProfile refetches
       queryClient.invalidateQueries({ queryKey: AUTH_KEYS.profile });
     },
-    onError: (err: unknown) => extractErrorMessage(err)
+    onError: (err: unknown) => extractError(err)
   });
 };
 
 /**
  * useLogout
  *
- * Not a TanStack Query hook — logout is purely client-side.
- * No API call needed — we just clear Zustand + localStorage
- * and redirect to login.
+ * Calls the backend logout endpoint to invalidate the refresh token
+ * (so the session cannot be silently extended even if the token is stolen),
+ * then clears local auth state and redirects to login.
+ *
+ * Best-effort server call — local auth is always cleared even if the
+ * API call fails (e.g. when offline or the token is already expired).
  */
 export const useLogout = () => {
-  const { clearAuth } = useAuthStore();
+  const { clearAuth, refreshToken } = useAuthStore();
   const navigate = useNavigate();
 
-  const logout = () => {
+  const logout = async () => {
+    if (refreshToken) {
+      try {
+        await logoutUser(refreshToken);
+      } catch {
+        // Swallow — clear local auth regardless of server response
+      }
+    }
     clearAuth();
     navigate('/login');
   };

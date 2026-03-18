@@ -3,15 +3,23 @@
  *
  * Zustand store for authentication state.
  *
- * Zustand is simpler than Redux — no actions, reducers, or dispatchers.
- * You define state and functions to update it in one place.
+ * Two-token auth pattern:
+ *   token        — short-lived JWT access token (15 min). Sent as the
+ *                  Authorization header on every protected API call.
+ *                  When it expires the axios interceptor silently refreshes it.
+ *   refreshToken — long-lived UUID (7 days). Stored here and used only by
+ *                  the axios interceptor to call POST /users/refresh.
+ *                  Never sent to any protected route directly.
  *
- * The persist middleware from zustand automatically syncs this store
- * to localStorage so the token and user survive page refreshes.
- * Without persist, Zustand state is in-memory only and is lost on refresh.
+ * The persist middleware automatically saves/loads state to localStorage
+ * so both tokens and the user profile survive page refreshes.
  *
  * Usage in any component:
- *   const { token, user, setAuth, clearAuth } = useAuthStore();
+ *   const { token, setAuth, clearAuth } = useAuthStore();
+ *
+ * Usage outside a component (e.g. axios interceptor):
+ *   useAuthStore.getState().token
+ *   useAuthStore.getState().setToken(newAccessToken)
  */
 
 import { create } from 'zustand';
@@ -26,33 +34,40 @@ import type { SafeUser } from '../types';
  */
 interface AuthStore {
   // ── State ──────────────────────────────────────────────────────────────────
-  token: string | null;   // raw JWT string — sent as Bearer token in every request
-  user: SafeUser | null;  // logged-in user's profile data
+  token: string | null;         // access token — sent in Authorization header
+  refreshToken: string | null;  // refresh token — used only to get new access tokens
+  user: SafeUser | null;
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
   /**
-   * setAuth — called after successful login or register.
-   * Stores the token and user in the store (and localStorage via persist).
+   * setAuth — called after successful login.
+   * Stores the access token, refresh token, and user profile.
    */
-  setAuth: (token: string, user: SafeUser) => void;
+  setAuth: (accessToken: string, refreshToken: string, user: SafeUser) => void;
+
+  /**
+   * setToken — called by the axios interceptor after a silent token refresh.
+   * Updates only the access token — leaves refreshToken and user unchanged.
+   */
+  setToken: (accessToken: string) => void;
 
   /**
    * setUser — called after a successful profile update.
-   * Updates just the user object without touching the token.
+   * Updates just the user object without touching the tokens.
    */
   setUser: (user: SafeUser) => void;
 
   /**
-   * clearAuth — called on logout or when a 401 is received.
-   * Wipes both token and user from the store and localStorage.
+   * clearAuth — called on logout or when refresh fails.
+   * Wipes all auth state from the store and localStorage.
    */
   clearAuth: () => void;
 
   /**
    * isAuthenticated — derived boolean.
-   * True if a token exists in the store.
-   * Used by ProtectedRoute and PublicRoute to decide where to redirect.
+   * True if an access token exists.
+   * Used by ProtectedRoute and PublicRoute.
    */
   isAuthenticated: () => boolean;
 }
@@ -68,18 +83,21 @@ export const useAuthStore = create<AuthStore>()(
 
       // ── Initial state ────────────────────────────────────────────
       token: null,
+      refreshToken: null,
       user: null,
 
       // ── Actions ──────────────────────────────────────────────────
 
-      setAuth: (token, user) => set({ token, user }),
+      setAuth: (accessToken, refreshToken, user) =>
+        set({ token: accessToken, refreshToken, user }),
+
+      // Only update the access token — called by the silent refresh interceptor.
+      setToken: (accessToken) => set({ token: accessToken }),
 
       setUser: (user) => set({ user }),
 
-      clearAuth: () => set({ token: null, user: null }),
+      clearAuth: () => set({ token: null, refreshToken: null, user: null }),
 
-      // get() reads the current state from within the store.
-      // This is how you access state inside an action in Zustand.
       isAuthenticated: () => !!get().token,
     }),
 
@@ -89,10 +107,10 @@ export const useAuthStore = create<AuthStore>()(
       name: 'auth-storage',
 
       // partialize controls which parts of the store are persisted.
-      // We only persist token and user — not the functions.
-      // Functions are always re-created when the store initialises.
+      // We persist both tokens and user — not the functions.
       partialize: (state) => ({
         token: state.token,
+        refreshToken: state.refreshToken,
         user: state.user
       })
     }

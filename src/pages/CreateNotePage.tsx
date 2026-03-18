@@ -14,7 +14,7 @@
  *   — On success, useCreateNote navigates to /notes automatically
  */
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -27,6 +27,11 @@ import {
   Chip,
   CircularProgress,
   Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   IconButton,
   InputAdornment,
   TextField,
@@ -36,7 +41,7 @@ import {
   ArrowBack as ArrowBackIcon,
   LocalOffer as TagIcon
 } from '@mui/icons-material';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useBlocker } from 'react-router-dom';
 import { useCreateNote } from '../hooks/useNotes';
 import { useSnackbar } from '../hooks/useSnackbar';
 import type { NoteFormData } from '../types';
@@ -74,7 +79,7 @@ const CreateNotePage = () => {
   const {
     register,
     handleSubmit,
-    formState: { errors }
+    formState: { errors, isDirty }
   } = useForm<NoteFormData>({
     resolver: zodResolver(createNoteSchema),
     defaultValues: {
@@ -83,6 +88,39 @@ const CreateNotePage = () => {
       tags: []
     }
   });
+
+  // ── Unsaved changes warning ────────────────────────────────────────────────
+
+  // Block in-app navigation when the user has typed anything
+  const hasContent = isDirty || tags.length > 0;
+
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      hasContent &&
+      !createNote.isSuccess &&
+      currentLocation.pathname !== nextLocation.pathname
+  );
+
+  // When the mutation succeeds, useCreateNote calls navigate('/notes').
+  // The blocker may intercept that navigation before React re-renders with
+  // isSuccess=true (stale closure). If that happens, auto-proceed here so
+  // the dialog never shows after a successful save.
+  useEffect(() => {
+    if (blocker.state === 'blocked' && createNote.isSuccess) {
+      blocker.proceed();
+    }
+  }, [blocker, createNote.isSuccess]);
+
+  // Warn on browser close/refresh too
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (hasContent && !createNote.isSuccess) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasContent, createNote.isSuccess]);
 
   // ── Tag handlers ───────────────────────────────────────────────────────────
 
@@ -146,7 +184,7 @@ const CreateNotePage = () => {
 
       {/* ── Page header ──────────────────────────────────────────── */}
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 4 }}>
-        <IconButton onClick={() => navigate('/notes')} size='small'>
+        <IconButton onClick={() => navigate('/notes')} size='small' aria-label='Back to notes'>
           <ArrowBackIcon />
         </IconButton>
         <Box>
@@ -264,6 +302,22 @@ const CreateNotePage = () => {
           </Box>
         </CardContent>
       </Card>
+      {/* ── Unsaved changes dialog ────────────────────────────────────────── */}
+      <Dialog open={blocker.state === 'blocked' && !createNote.isSuccess} onClose={() => blocker.reset()}>
+        <DialogTitle fontWeight={600}>Unsaved changes</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            You have started writing a note. If you leave now, your content will be lost.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => blocker.reset()}>Stay and keep writing</Button>
+          <Button onClick={() => blocker.proceed()} color='warning' variant='contained'>
+            Leave and discard
+          </Button>
+        </DialogActions>
+      </Dialog>
+
     </Container>
   );
 };

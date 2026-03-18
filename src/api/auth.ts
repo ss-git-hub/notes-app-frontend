@@ -7,6 +7,7 @@
  * will wrap these in the hooks/ folder.
  */
 
+import axios from 'axios';
 import api from './axios';
 import type {
   LoginResponse,
@@ -14,6 +15,37 @@ import type {
   ProfileResponse,
   UpdateProfileResponse
 } from '../types';
+
+// ── Token refresh ────────────────────────────────────────────────────────────
+
+/**
+ * refreshAccessToken — exchanges a valid refresh token for a new access token.
+ *
+ * Why use raw axios here instead of the configured `api` instance?
+ *   The `api` instance has a response interceptor that calls THIS function
+ *   on 401s. If we used `api` here we would create a circular call loop.
+ *   Using raw axios bypasses the interceptor entirely — the refresh endpoint
+ *   either works or it doesn't; we handle the failure in the interceptor itself.
+ */
+export const refreshAccessToken = async (
+  refreshToken: string
+): Promise<{ accessToken: string }> => {
+  const res = await axios.post<{ accessToken: string }>(
+    `${import.meta.env.VITE_API_URL}/users/refresh`,
+    { refreshToken },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+  return res.data;
+};
+
+/**
+ * logoutUser — invalidates the refresh token on the server.
+ * Deletes the token row from DynamoDB so it can never be used again.
+ * Called before clearing local auth state in useLogout.
+ */
+export const logoutUser = async (refreshToken: string): Promise<void> => {
+  await api.post('/users/logout', { refreshToken });
+};
 
 // ── Auth endpoints ───────────────────────────────────────────────────────────
 

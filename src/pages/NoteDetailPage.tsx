@@ -18,7 +18,7 @@
 
 import { useState, useEffect } from 'react';
 import type { KeyboardEvent } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useBlocker } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -116,16 +116,50 @@ const NoteDetailPage = () => {
     register,
     handleSubmit,
     reset,
-    formState: { errors }
+    formState: { errors, isDirty }
   } = useForm<NoteFormData>({
     resolver: zodResolver(editNoteSchema),
     defaultValues: { title: '', content: '', tags: [] }
   });
 
+  // ── Unsaved changes warning ────────────────────────────────────────────────
+
   /**
-   * When note data loads, populate the form and tags with existing values.
-   * reset() sets all form fields to the note's current values.
-   * This runs whenever the note data changes — including after an update.
+   * useBlocker intercepts in-app navigation (React Router link clicks,
+   * navigate() calls) when the user has unsaved edits.
+   * It gives us a chance to show a confirmation dialog before leaving.
+   *
+   * When blocker.state === 'blocked':
+   *   blocker.proceed() — leave the page and discard changes
+   *   blocker.reset()   — stay on the page and keep editing
+   */
+  const blocker = useBlocker(
+    ({ currentLocation, nextLocation }) =>
+      isEditing && isDirty && currentLocation.pathname !== nextLocation.pathname
+  );
+
+  /**
+   * beforeunload — warns when the user tries to close/refresh the browser tab.
+   * The browser shows its own generic confirmation dialog in this case.
+   * We can't customize the message (browsers removed that for security reasons).
+   */
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isEditing && isDirty) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isEditing, isDirty]);
+
+  /**
+   * When note data loads, populate the form with existing values.
+   * reset() is from React Hook Form — it's not a React setState call,
+   * so calling it inside useEffect is fine with the linter.
+   *
+   * Tags are NOT synced here to avoid the "setState in effect" lint rule.
+   * Instead, tags are initialized when the user clicks Edit (handleStartEditing).
    */
   useEffect(() => {
     if (data?.note) {
@@ -134,7 +168,6 @@ const NoteDetailPage = () => {
         content: data.note.content,
         tags: data.note.tags
       });
-      setTags(data.note.tags);
     }
   }, [data?.note, reset]);
 
@@ -165,7 +198,18 @@ const NoteDetailPage = () => {
   // ── Edit mode handlers ─────────────────────────────────────────────────────
 
   /**
-   * handleCancelEdit — exits edit mode and resets form back to
+   * handleStartEditing — enters edit mode and initializes the tags array
+   * from the note's current tags. Tags are managed separately from RHF
+   * (because they're built up interactively), so we sync them here rather
+   * than inside a useEffect (which would trigger the setState-in-effect rule).
+   */
+  const handleStartEditing = () => {
+    setTags(data?.note?.tags ?? []);
+    setIsEditing(true);
+  };
+
+  /**
+   * handleCancelEdit — exits edit mode and resets form + tags back to
    * the original note values so unsaved changes are discarded.
    */
   const handleCancelEdit = () => {
@@ -276,7 +320,7 @@ const NoteDetailPage = () => {
         }}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <IconButton onClick={() => navigate('/notes')} size='small'>
+          <IconButton onClick={() => navigate('/notes')} size='small' aria-label='Back to notes'>
             <ArrowBackIcon />
           </IconButton>
           <Typography variant='h5' fontWeight={700}>
@@ -291,8 +335,9 @@ const NoteDetailPage = () => {
               {/* View mode — Edit and Delete buttons */}
               <Tooltip title='Edit note'>
                 <IconButton
-                  onClick={() => setIsEditing(true)}
+                  onClick={handleStartEditing}
                   color='primary'
+                  aria-label='Edit note'
                 >
                   <EditIcon />
                 </IconButton>
@@ -301,6 +346,7 @@ const NoteDetailPage = () => {
                 <IconButton
                   onClick={() => setDeleteDialogOpen(true)}
                   color='error'
+                  aria-label='Delete note'
                 >
                   <DeleteIcon />
                 </IconButton>
@@ -454,6 +500,25 @@ const NoteDetailPage = () => {
           )}
         </CardContent>
       </Card>
+
+      {/* ── Unsaved changes dialog ────────────────────────────────────────────
+           Shown when the user tries to navigate away while editing with
+           unsaved changes. blocker.state becomes 'blocked' when useBlocker
+           intercepts a navigation attempt that matches its condition. */}
+      <Dialog open={blocker.state === 'blocked'} onClose={() => blocker.reset()}>
+        <DialogTitle fontWeight={600}>Unsaved changes</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            You have unsaved changes. If you leave now, your edits will be lost.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => blocker.reset()}>Stay and keep editing</Button>
+          <Button onClick={() => blocker.proceed()} color='warning' variant='contained'>
+            Leave and discard
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* ── Delete confirmation dialog ─────────────────────────────────────── */}
       <Dialog

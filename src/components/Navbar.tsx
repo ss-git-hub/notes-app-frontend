@@ -127,8 +127,15 @@ const Navbar = () => {
           </Button>
 
           {/* User avatar — opens dropdown menu on click */}
-          <Tooltip title='Account'>
-            <IconButton onClick={handleMenuOpen} size='small'>
+          <Tooltip title='Account menu'>
+            <IconButton
+              onClick={handleMenuOpen}
+              size='small'
+              aria-label='Open account menu'
+              aria-controls={menuOpen ? 'account-menu' : undefined}
+              aria-haspopup='true'
+              aria-expanded={menuOpen ? 'true' : undefined}
+            >
               <Avatar
                 sx={{
                   width: 36,
@@ -142,11 +149,13 @@ const Navbar = () => {
               </Avatar>
             </IconButton>
           </Tooltip>
+
         </Box>
       </Toolbar>
 
       {/* ── User dropdown menu ─────────────────────────────────────────────── */}
       <Menu
+        id='account-menu'
         anchorEl={anchorEl}
         open={menuOpen}
         onClose={handleMenuClose}

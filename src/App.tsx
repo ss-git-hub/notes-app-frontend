@@ -1,7 +1,12 @@
 /**
  * src/App.tsx
  *
- * Root component — defines all application routes.
+ * Application router — built with createBrowserRouter (data router API).
+ *
+ * Why createBrowserRouter instead of <BrowserRouter>?
+ *   useBlocker (used in CreateNotePage and NoteDetailPage for the unsaved-
+ *   changes warning) only works inside a data router. Component-based routers
+ *   like <BrowserRouter> do not support it.
  *
  * Route structure:
  *
@@ -16,46 +21,75 @@
  *       /notes/:noteId    → NoteDetailPage
  *       /profile          → ProfilePage
  *   *                     → redirects to /notes (catch-all)
+ *
+ * Code splitting: all page components are loaded lazily so each route gets
+ * its own JS chunk. Suspense renders a centered spinner while loading.
  */
 
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { lazy, Suspense } from 'react';
+import { createBrowserRouter, RouterProvider, Navigate, Outlet } from 'react-router-dom';
+import { Box, CircularProgress } from '@mui/material';
 import ProtectedRoute from './components/ProtectedRoute';
 import PublicRoute from './components/PublicRoute';
 import Layout from './components/Layout';
-import LoginPage from './pages/LoginPage';
-import RegisterPage from './pages/RegisterPage';
-import NotesPage from './pages/NotesPage';
-import CreateNotePage from './pages/CreateNotePage';
-import NoteDetailPage from './pages/NoteDetailPage';
-import ProfilePage from './pages/ProfilePage';
 
-const App = () => {
-  return (
-    <Routes>
-      {/* Root redirect */}
-      <Route path='/' element={<Navigate to='/notes' replace />} />
+// Pages loaded lazily — each becomes a separate JS chunk
+const LoginPage      = lazy(() => import('./pages/LoginPage'));
+const RegisterPage   = lazy(() => import('./pages/RegisterPage'));
+const NotesPage      = lazy(() => import('./pages/NotesPage'));
+const CreateNotePage = lazy(() => import('./pages/CreateNotePage'));
+const NoteDetailPage = lazy(() => import('./pages/NoteDetailPage'));
+const ProfilePage    = lazy(() => import('./pages/ProfilePage'));
 
-      {/* ── Public routes ──────────────────────────────────────── */}
-      <Route element={<PublicRoute />}>
-        <Route path='/login' element={<LoginPage />} />
-        <Route path='/register' element={<RegisterPage />} />
-      </Route>
+const PageLoader = () => (
+  <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '60vh' }}>
+    <CircularProgress />
+  </Box>
+);
 
-      {/* ── Protected routes ───────────────────────────────────── */}
-      {/* ProtectedRoute checks auth, Layout renders Navbar + content */}
-      <Route element={<ProtectedRoute />}>
-        <Route element={<Layout />}>
-          <Route path='/notes' element={<NotesPage />} />
-          <Route path='/notes/new' element={<CreateNotePage />} />
-          <Route path='/notes/:noteId' element={<NoteDetailPage />} />
-          <Route path='/profile' element={<ProfilePage />} />
-        </Route>
-      </Route>
+// Wrap all routes in Suspense so lazy pages show a spinner while loading
+const SuspenseOutlet = () => (
+  <Suspense fallback={<PageLoader />}>
+    <Outlet />
+  </Suspense>
+);
 
-      {/* ── Catch-all ──────────────────────────────────────────── */}
-      <Route path='*' element={<Navigate to='/notes' replace />} />
-    </Routes>
-  );
-};
+const router = createBrowserRouter([
+  {
+    element: <SuspenseOutlet />,
+    children: [
+      { path: '/', element: <Navigate to='/notes' replace /> },
+
+      // Public routes — redirect to /notes if already logged in
+      {
+        element: <PublicRoute />,
+        children: [
+          { path: '/login',    element: <LoginPage /> },
+          { path: '/register', element: <RegisterPage /> }
+        ]
+      },
+
+      // Protected routes — redirect to /login if not authenticated
+      {
+        element: <ProtectedRoute />,
+        children: [
+          {
+            element: <Layout />,
+            children: [
+              { path: '/notes',          element: <NotesPage /> },
+              { path: '/notes/new',      element: <CreateNotePage /> },
+              { path: '/notes/:noteId',  element: <NoteDetailPage /> },
+              { path: '/profile',        element: <ProfilePage /> }
+            ]
+          }
+        ]
+      },
+
+      { path: '*', element: <Navigate to='/notes' replace /> }
+    ]
+  }
+]);
+
+const App = () => <RouterProvider router={router} />;
 
 export default App;
