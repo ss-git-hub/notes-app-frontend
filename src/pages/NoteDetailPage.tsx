@@ -505,7 +505,7 @@ const NoteDetailPage = () => {
            Shown when the user tries to navigate away while editing with
            unsaved changes. blocker.state becomes 'blocked' when useBlocker
            intercepts a navigation attempt that matches its condition. */}
-      <Dialog open={blocker.state === 'blocked'} onClose={() => blocker.reset()}>
+      <Dialog open={blocker.state === 'blocked'} onClose={() => blocker.reset?.()}>
         <DialogTitle fontWeight={600}>Unsaved changes</DialogTitle>
         <DialogContent>
           <DialogContentText>
@@ -513,8 +513,8 @@ const NoteDetailPage = () => {
           </DialogContentText>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={() => blocker.reset()}>Stay and keep editing</Button>
-          <Button onClick={() => blocker.proceed()} color='warning' variant='contained'>
+          <Button onClick={() => blocker.reset?.()}>Stay and keep editing</Button>
+          <Button onClick={() => blocker.proceed?.()} color='warning' variant='contained'>
             Leave and discard
           </Button>
         </DialogActions>
